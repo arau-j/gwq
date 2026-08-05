@@ -94,8 +94,9 @@ func (g *Git) getMainRepoRoot() (string, error) {
 	// repository root is the parent. A bare repository's common directory IS
 	// the repository root; taking its parent collapses every bare repository
 	// under the same directory and prevents per-repository gwq setup from
-	// matching.
-	bareOutput, err := g.run("rev-parse", "--is-bare-repository")
+	// matching. `--is-bare-repository` describes the current worktree, not its
+	// shared repository, so use the common configuration instead.
+	bareOutput, err := g.run("config", "--bool", "--default=false", "--get", "core.bare")
 	if err != nil {
 		return "", fmt.Errorf("failed to determine whether repository is bare: %w", err)
 	}
