@@ -106,6 +106,21 @@ func runPruneExpired(cmd *cobra.Command, args []string) error {
 				skipped++
 				continue
 			}
+			unpushed, err := hasUnpushedCommits(entry.Path)
+			if err != nil {
+				fmt.Printf("Warning: could not check for unpushed commits in %s: %v\n", entry.Path, err)
+				skipped++
+				continue
+			}
+			if unpushed {
+				if pruneDryRun {
+					fmt.Printf("Would skip (unpushed commits): %s\n", entry.Path)
+				} else {
+					fmt.Printf("Skipping (unpushed commits): %s (use --force to override)\n", entry.Path)
+				}
+				skipped++
+				continue
+			}
 		}
 
 		// Check if worktree directory still exists
@@ -164,4 +179,33 @@ func isWorktreeDirty(path string) (bool, error) {
 		return false, fmt.Errorf("failed to check git status: %w", err)
 	}
 	return strings.TrimSpace(string(output)) != "", nil
+}
+
+// hasUnpushedCommits reports whether this worktree's HEAD exists on no remote.
+//
+// The dirty check above misses it entirely: a worktree can have a perfectly
+// clean tree and still be the only checkout of work nobody else has seen.
+// Measured before this existed — an expired worktree holding a fresh commit was
+// removed with no mention of it at all.
+//
+// The commits themselves are NOT lost when the worktree goes: `git worktree
+// remove` leaves the branch ref alone, so they stay reachable in the repository.
+// What goes is the developer's place in the work — an in-flight change whose
+// checkout vanishes on a timer. That is a surprise worth refusing by default and
+// nothing worse, which is why --force still overrides.
+//
+// Asks "does any remote-tracking ref contain HEAD" rather than comparing against
+// an upstream, because these branches frequently have no upstream configured at
+// all — an agent-created branch that was pushed by tooling has a remote ref and
+// no tracking config, and an upstream-based check would call it unpushed
+// forever.
+func hasUnpushedCommits(path string) (bool, error) {
+	cmd := exec.Command("git", "-C", path, "branch", "-r", "--contains", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		// A worktree with no commits at all (a fresh orphan branch) makes this
+		// fail. Nothing is at stake there, so let the other guards decide.
+		return false, nil
+	}
+	return strings.TrimSpace(string(output)) == "", nil
 }
