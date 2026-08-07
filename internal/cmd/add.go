@@ -17,6 +17,7 @@ var (
 	addForce       bool
 	addStay        bool
 	addExpires     string
+	addFrom        string
 )
 
 // addCmd represents the add command.
@@ -46,7 +47,14 @@ Use -i flag to interactively select a branch using fuzzy finder.`,
   gwq add --expires 7d feature/experiment
 
   # Create worktree expiring in 1 hour
-  gwq add --expires 1h hotfix/quick-test`,
+  gwq add --expires 1h hotfix/quick-test
+
+  # Branch from a specific base instead of the remote's default branch
+  gwq add -b feature/api-v2 --from origin/release-2
+
+  # Branch from the current HEAD (the pre-0.1.2 behaviour), e.g. to stack
+  # a branch on top of the work in the worktree you are standing in
+  gwq add -b feature/api-v2-followup --from HEAD`,
 	RunE:              runAdd,
 	ValidArgsFunction: getBranchCompletions,
 }
@@ -59,6 +67,8 @@ func init() {
 	addCmd.Flags().BoolVarP(&addForce, "force", "f", false, "Overwrite existing directory")
 	addCmd.Flags().BoolVarP(&addStay, "stay", "s", false, "Stay in worktree directory after creation")
 	addCmd.Flags().StringVar(&addExpires, "expires", "", "Set expiration (e.g., 1d, 7d, 1h)")
+	addCmd.Flags().StringVar(&addFrom, "from", "",
+		"Base ref for a branch created with -b (default: the remote's default branch; use HEAD for the current commit)")
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
@@ -85,6 +95,12 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			if selectedBranch.IsRemote {
 				branch = selectedBranch.Name[len("origin/"):]
 				addBranch = true
+				// Picking origin/feature/x from the finder means "give me
+				// that branch", so its own remote ref is the base — not the
+				// default branch a bare -b would resolve to.
+				if addFrom == "" {
+					addFrom = selectedBranch.Name
+				}
 			}
 		} else {
 			if len(args) < 1 {
@@ -115,7 +131,17 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			expiresDuration = d
 		}
 
-		worktreePath, err := ctx.WorktreeManager.Add(branch, path, addBranch)
+		var worktreePath string
+		var err error
+		var base baseChoice
+		if addBranch {
+			base = newBranchBase(ctx.Git, addFrom)
+		}
+		if base.Ref != "" {
+			worktreePath, err = ctx.WorktreeManager.AddFromBase(branch, base.Ref, path)
+		} else {
+			worktreePath, err = ctx.WorktreeManager.Add(branch, path, addBranch)
+		}
 		if err != nil {
 			return err
 		}
@@ -154,6 +180,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 				Path:      worktreePath,
 				Stay:      addStay,
 				ExpiresAt: expiresAt,
+				Base:      base,
 			},
 			LaunchShell,
 		)
@@ -168,6 +195,65 @@ type addResult struct {
 	Path      string
 	Stay      bool
 	ExpiresAt *time.Time
+	Base      baseChoice
+}
+
+// baseChoice records what a new branch was started from, and how sure we are
+// that it is current.
+type baseChoice struct {
+	// Ref is the start point passed to git. Empty means none was chosen and
+	// git's own default applies — the current HEAD.
+	Ref string
+	// Defaulted reports that Ref came from the remote rather than from the
+	// caller, which is the case worth printing: the caller did not say where
+	// the branch should start, so tell them where it did.
+	Defaulted bool
+	// Stale reports that the ref could not be refreshed from the remote, so
+	// the branch starts from whatever the last fetch left behind.
+	Stale bool
+}
+
+// baseResolver is the git surface newBranchBase depends on.
+type baseResolver interface {
+	DefaultBaseRef(remote string) string
+	FetchRef(ref string) error
+}
+
+// newBranchBase decides the start point for a branch created with -b.
+//
+// Without this, `git worktree add -b` starts the branch at the invoking
+// process's HEAD. That is defensible in a single-checkout repository where you
+// are usually standing on the trunk, and wrong under a bare repository where
+// every checkout is a worktree and nobody ever stands on the trunk: the new
+// branch inherits the commits of whichever worktree the shell happened to be
+// in. Two pull requests opened on 2026-08-07 carried an unrelated commit for
+// exactly this reason.
+//
+// `--from HEAD` is the escape hatch for the case the old default served —
+// deliberately stacking a branch on the work in front of you.
+func newBranchBase(g baseResolver, explicit string) baseChoice {
+	if explicit == "HEAD" {
+		return baseChoice{}
+	}
+
+	c := baseChoice{Ref: explicit}
+	if c.Ref == "" {
+		c.Ref = g.DefaultBaseRef("")
+		c.Defaulted = true
+		// No remote default to resolve — a local-only repository, or a clone
+		// with neither main nor master. Keep git's behaviour rather than
+		// failing a worktree creation over it.
+		if c.Ref == "" {
+			return baseChoice{}
+		}
+	}
+
+	// A base is only worth defaulting to if it is current; branching from a
+	// week-old trunk trades one surprise for another.
+	if err := g.FetchRef(c.Ref); err != nil {
+		c.Stale = true
+	}
+	return c
 }
 
 // handleAddPostCreate routes success messages and the worktree path to the
@@ -190,6 +276,16 @@ func handleAddPostCreate(
 		msgDst = stderr
 	}
 	_, _ = fmt.Fprintf(msgDst, "Created worktree for branch '%s'\n", r.Branch)
+	// Announce a base the caller did not ask for. Silently choosing a start
+	// point is how the old behaviour went unnoticed for so long.
+	if r.Base.Defaulted && r.Base.Ref != "" {
+		if r.Base.Stale {
+			_, _ = fmt.Fprintf(msgDst,
+				"Branched from %s (could not fetch — base may be stale)\n", r.Base.Ref)
+		} else {
+			_, _ = fmt.Fprintf(msgDst, "Branched from %s\n", r.Base.Ref)
+		}
+	}
 	if r.ExpiresAt != nil {
 		_, _ = fmt.Fprintf(msgDst, "Worktree expires at %s\n", r.ExpiresAt.Format(time.RFC3339))
 	}
