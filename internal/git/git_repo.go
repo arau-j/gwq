@@ -90,7 +90,23 @@ func (g *Git) getMainRepoRoot() (string, error) {
 		commonDir = filepath.Join(g.workDir, commonDir)
 	}
 
-	repoRoot := filepath.Dir(filepath.Clean(commonDir))
+	// A normal worktree's common directory is its `.git` directory, so its
+	// repository root is the parent. A bare repository's common directory IS
+	// the repository root; taking its parent collapses every bare repository
+	// under the same directory and prevents per-repository gwq setup from
+	// matching. `--is-bare-repository` describes the current worktree, not its
+	// shared repository, so use the common configuration instead.
+	bareOutput, err := g.run("config", "--bool", "--default=false", "--get", "core.bare")
+	if err != nil {
+		return "", fmt.Errorf("failed to determine whether repository is bare: %w", err)
+	}
+
+	var repoRoot string
+	if strings.TrimSpace(bareOutput) == "true" {
+		repoRoot = filepath.Clean(commonDir)
+	} else {
+		repoRoot = filepath.Dir(filepath.Clean(commonDir))
+	}
 
 	// Resolve symlinks to ensure consistent path comparison
 	// (e.g., macOS /var -> /private/var)
