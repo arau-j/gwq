@@ -83,7 +83,7 @@ func mergeLocalConfig(store *TrustStore, prompter trustPrompter, interactive boo
 
 	if !store.IsTrusted(absPath, sum) {
 		if !interactive {
-			fmt.Fprintf(os.Stderr, "gwq: skipping untrusted local config %s (non-interactive session)\n", absPath)
+			reportSkippedLocalConfig(os.Stderr, absPath, data)
 			return nil
 		}
 		granted, err := prompter.PromptTrust(absPath, data)
