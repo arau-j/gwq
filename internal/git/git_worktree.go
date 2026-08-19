@@ -120,10 +120,45 @@ func (g *Git) RemoveWorktree(path string, force bool) error {
 	args = append(args, path)
 
 	if _, err := g.run(args...); err != nil {
+		if !force && mentionsSubmodules(err) {
+			return fmt.Errorf("%w\n\n%s", err, submoduleRemoveHint)
+		}
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
 
 	return nil
+}
+
+// git refuses to remove a worktree that contains submodules:
+//
+//	fatal: working trees containing submodules cannot be moved or removed
+//
+// It says so whether or not the worktree is clean, and it does not mention the
+// flag that gets past it. `--force` does — measured on git 2.55.0, a plain
+// remove of a submodule worktree fails and the same remove with `--force`
+// succeeds — but nothing connects the two: gwq's own `--force` is documented as
+// "Force delete even if dirty", which reads as being about uncommitted changes,
+// so a caller staring at a submodule error has no reason to try it.
+//
+// An agent hit exactly that on 2026-08-19 and recorded the removal as
+// impossible, leaving an empty worktree behind. So say it here, at the moment
+// it is refused, along with the one thing `--force` genuinely risks.
+const submoduleRemoveHint = "This worktree contains submodules, and git refuses to remove those without --force\n" +
+	"even when the worktree is clean. Re-run with --force:\n" +
+	"\n" +
+	"    gwq remove --force <worktree>\n" +
+	"\n" +
+	"--force also discards uncommitted changes, so check `git -C <worktree> status` first\n" +
+	"if the worktree might not be clean."
+
+// mentionsSubmodules reports whether git refused because of submodules.
+//
+// Matched on the stable middle of the sentence rather than the whole line: git
+// uses the same "containing submodules" wording for `worktree move` and has
+// reworded around it before, and a hint that stops appearing after a git upgrade
+// is worse than one that occasionally appears for the neighbouring verb.
+func mentionsSubmodules(err error) bool {
+	return strings.Contains(err.Error(), "containing submodules")
 }
 
 // PruneWorktrees removes worktree information for deleted directories.
