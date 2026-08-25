@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/d-kuro/gwq/internal/command"
 	"github.com/d-kuro/gwq/internal/filesystem"
@@ -34,6 +35,29 @@ func (m *Manager) runPostWorktreeSetupWithExecutor(ctx context.Context, executor
 
 	repoSetting := findRepoSetting(m.config.RepositorySettings, repoRoot)
 	if repoSetting == nil {
+		// Most repositories legitimately have no entry, and saying so every time
+		// would be noise. A configured path that does NOT EXIST is different:
+		// it can never match anything, so its setup_commands are dead and
+		// nothing says so.
+		//
+		// That is not hypothetical. `repository = "/home/joan/repos/pi-house"`
+		// went stale when that repo moved to a bare layout on 2026-08-05, and
+		// for two weeks every worktree cut from it started with no
+		// `node_modules` — so the repo's own prescribed gate answered
+		// `tsc: command not found`. Three sessions hit it and none could see
+		// why, because a skipped setup produces no output at all. The same
+		// class recurred five days later for the same repo's clones under
+		// ~/.hive/scratch.
+		//
+		// Reported only on the miss, so a matched repo pays nothing, and only
+		// for literal paths — a glob that matches nothing today may match
+		// tomorrow and is not evidence of rot.
+		if stale := staleRepositoryPaths(m.config.RepositorySettings); len(stale) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"[gwq] warning: no repository_settings matched %s, so no setup ran. "+
+					"These configured paths do not exist and can never match: %s\n",
+				repoRoot, strings.Join(stale, ", "))
+		}
 		return nil
 	}
 
@@ -103,4 +127,28 @@ func findRepoSetting(settings []models.RepositorySetting, repoRoot string) *mode
 		}
 	}
 	return nil
+}
+
+// staleRepositoryPaths reports configured `repository` values that name a path
+// which is not there.
+//
+// Literal paths only. A glob is a pattern for repositories that may not exist
+// yet — `~/.hive/scratch/*/pi-house` names none until an agent is launched —
+// so an unmatched glob is ordinary and an unmatched literal is a typo or a
+// layout change nobody propagated here.
+//
+// A leading `~` is caught by this too, and deliberately: gwq does not expand
+// it, so `~/repos/foo` is a literal directory name that will never exist and
+// its setup_commands are as dead as a stale absolute path's.
+func staleRepositoryPaths(settings []models.RepositorySetting) []string {
+	var stale []string
+	for _, s := range settings {
+		if s.Repository == "" || strings.ContainsAny(s.Repository, "*?[") {
+			continue
+		}
+		if _, err := os.Stat(s.Repository); err != nil && os.IsNotExist(err) {
+			stale = append(stale, s.Repository)
+		}
+	}
+	return stale
 }

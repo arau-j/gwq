@@ -189,7 +189,16 @@ func handleAddPostCreate(
 	if inShim {
 		msgDst = stderr
 	}
-	_, _ = fmt.Fprintf(msgDst, "Created worktree for branch '%s'\n", r.Branch)
+	// SAY WHERE IT WENT. The message named only the branch, and the path reached
+	// stdout in exactly one case — shell integration with a cd wanted — so every
+	// non-interactive caller was told a worktree exists and left to work out
+	// where. Measured 2026-08-19: an agent then looked in a directory it had
+	// guessed, found no package.json, and filed the empty directory as the bug.
+	//
+	// It goes to msgDst, which is stderr under the shim and stdout otherwise, so
+	// the shell wrapper's stdout contract below is untouched: it still receives
+	// the bare path, and only when a cd is wanted.
+	_, _ = fmt.Fprintf(msgDst, "Created worktree for branch '%s' at %s\n", r.Branch, r.Path)
 	if r.ExpiresAt != nil {
 		_, _ = fmt.Fprintf(msgDst, "Worktree expires at %s\n", r.ExpiresAt.Format(time.RFC3339))
 	}
