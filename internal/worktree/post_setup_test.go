@@ -3,6 +3,9 @@ package worktree
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -156,5 +159,87 @@ func TestRunPostWorktreeSetup_NoMatchingRepoSetting(t *testing.T) {
 	}
 	if len(exec.calls) != 0 {
 		t.Errorf("expected no executor calls, got %d", len(exec.calls))
+	}
+}
+
+// A configured path that does not exist can never match anything, so its
+// setup_commands are dead — and a skipped setup produces no output at all.
+//
+// `repository = "/home/joan/repos/pi-house"` went stale when that repo moved to
+// a bare layout on 2026-08-05. For two weeks every worktree cut from it started
+// with no dependencies, so the repo's own prescribed gate answered
+// `tsc: command not found`. Three sessions hit it and none could see why. The
+// same class recurred five days later for that repo's clones under a scratch
+// root. One line at match time would have shown both.
+func TestStaleRepositoryPaths(t *testing.T) {
+	existing := t.TempDir()
+
+	got := staleRepositoryPaths([]models.RepositorySetting{
+		{Repository: existing},
+		{Repository: filepath.Join(existing, "gone")},
+		// A glob names repositories that may not exist YET — a scratch root has
+		// none until an agent is launched — so an unmatched glob is ordinary and
+		// must never be reported as rot.
+		{Repository: filepath.Join(existing, "*", "pi-house")},
+		{Repository: ""},
+	})
+
+	want := []string{filepath.Join(existing, "gone")}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("staleRepositoryPaths = %v; want %v", got, want)
+	}
+}
+
+// The WIRING: the warning has to reach stderr on the miss. A helper that
+// computes a perfect list nobody prints is the silent skip again.
+func TestRunPostWorktreeSetup_WarnsAboutStaleConfiguredPaths(t *testing.T) {
+	git := &mockGit{repoPath: "/mock/repo/path"}
+	m := buildManagerWithRepoSetting(git, models.RepositorySetting{
+		Repository:    "/definitely/not/here",
+		SetupCommands: []string{"echo should-not-run"},
+	})
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	m.runPostWorktreeSetupWithExecutor(context.Background(), newRecordingExecutor(), "br", "/wt/br")
+	os.Stderr = orig
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	for _, want := range []string{"/definitely/not/here", "no setup ran", "/mock/repo/path"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("stderr = %q; want it to contain %q", out, want)
+		}
+	}
+}
+
+// …and a repo that simply has no entry stays quiet. Most repositories are that
+// case, and a warning on every one of them is noise that trains the reader to
+// skip the line the stale case needs them to read.
+func TestRunPostWorktreeSetup_QuietWhenNothingIsStale(t *testing.T) {
+	existing := t.TempDir()
+	git := &mockGit{repoPath: "/mock/repo/path"}
+	m := buildManagerWithRepoSetting(git, models.RepositorySetting{
+		Repository:    existing,
+		SetupCommands: []string{"echo should-not-run"},
+	})
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	m.runPostWorktreeSetupWithExecutor(context.Background(), newRecordingExecutor(), "br", "/wt/br")
+	os.Stderr = orig
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	if len(out) != 0 {
+		t.Errorf("stderr = %q; want silence when the config is merely unmatched", out)
 	}
 }

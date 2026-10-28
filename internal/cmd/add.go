@@ -275,7 +275,16 @@ func handleAddPostCreate(
 	if inShim {
 		msgDst = stderr
 	}
-	_, _ = fmt.Fprintf(msgDst, "Created worktree for branch '%s'\n", r.Branch)
+	// SAY WHERE IT WENT. The message named only the branch, and the path reached
+	// stdout in exactly one case — shell integration with a cd wanted — so every
+	// non-interactive caller was told a worktree exists and left to work out
+	// where. Measured 2026-08-19: an agent then looked in a directory it had
+	// guessed, found no package.json, and filed the empty directory as the bug.
+	//
+	// It goes to msgDst, which is stderr under the shim and stdout otherwise, so
+	// the shell wrapper's stdout contract below is untouched: it still receives
+	// the bare path, and only when a cd is wanted.
+	_, _ = fmt.Fprintf(msgDst, "Created worktree for branch '%s' at %s\n", r.Branch, r.Path)
 	// Announce a base the caller did not ask for. Silently choosing a start
 	// point is how the old behaviour went unnoticed for so long.
 	if r.Base.Defaulted && r.Base.Ref != "" {
